@@ -1,14 +1,131 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="pt-BR">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Projeto Integração</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.0/mqttws31.js" integrity="sha512-e6nMrZX9Li26UyD0znvtLkki+E40EzsK0CGUt+EHdC8cAxlakzJfbsgChf+M4df1P/hxKT8DN0Q7ktK1QnOtWg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <meta name="theme-color" content="#0d1117">
+    <title>Weather IoT | Central de monitoramento</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.0/mqttws31.js"
+        integrity="sha512-e6nMrZX9Li26UyD0znvtLkki+E40EzsK0CGUt+EHdC8cAxlakzJfbsgChf+M4df1P/hxKT8DN0Q7ktK1QnOtWg=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <link rel="stylesheet" href="static/css/style.css">
 </head>
+
 <body>
-    
+    <div class="app-shell">
+        <header class="topbar">
+            <a class="brand" href="#inicio">
+                <span class="brand-mark">W</span><span>
+                    <strong>WEATHER</strong><small>IoT CONTROL</small></span>
+            </a>
+            <div class="topbar-actions"><span class="system-status"><i id="api-dot">
+
+                    </i><span id="api-status">API desconectada</span></span>
+                <button class="icon-button" id="refresh-button" title="Atualizar dados"
+                    aria-label="Atualizar dados">↻</button>
+            </div>
+        </header>
+        <main id="inicio">
+            <section class="hero-section">
+                <div>
+                    <p class="eyebrow">PAINEL DE TELEMETRIA <span id="last-sync">Aguardando leitura</span></p>
+                    <h1>O clima em<br><em>tempo real.</em></h1>
+                    <p class="hero-copy">Dados do seu dispositivo ESP32 reunidos em um só lugar.</p>
+                </div>
+                <div class="device-card">
+                    <div class="device-card-top"><span class="live-pulse"></span>
+                        DISPOSITIVO ONLINE <span class="device-id">ESP32 / DHT22</span>
+                    </div>
+                    <div class="device-reading"><span id="hero-temperature">--</span><sup>°C</sup>
+                    </div>
+                    <div class="device-meta"><span id="hero-weather">Aguardando clima</span><span id="hero-time">
+                            --:--</span></div>
+                    <div class="meter"><span id="temperature-meter"></span></div>
+                </div>
+            </section>
+            <section class="metric-grid" aria-label="Leituras atuais">
+                <article class="metric-card temperature-card">
+                    <div class="metric-heading"><span class="metric-icon">°</span><span>TEMPERATURA</span><span
+                            class="trend up">● AO VIVO</span></div>
+                    <div class="metric-value"><span id="temperature">--</span><small>°C</small></div>
+                    <p>Leitura capturada pelo sensor DHT22</p>
+                </article>
+                <article class="metric-card humidity-card">
+                    <div class="metric-heading"><span class="metric-icon">≈</span><span>UMIDADE</span><span
+                            class="trend">DHT22</span></div>
+                    <div class="metric-value"><span id="humidity">--</span><small>%</small></div>
+                    <div class="humidity-bar"><span id="humidity-meter"></span></div>
+                    <p>Umidade relativa do ambiente</p>
+                </article> 
+                <!--
+                serve para marcar um conteúdo independente, autossuficiente e reutilizável dentro de uma
+                página
+                -->
+                <article class="metric-card condition-card">
+                    <div class="metric-heading"><span class="metric-icon">✦</span><span>CONDIÇÃO</span><span
+                            class="trend">STATUS</span></div>
+                    <div class="condition-value" id="condition">--</div>
+                    <p id="condition-description">Aguardando dados do dispositivo</p>
+                </article>
+            </section>
+            <section class="content-grid">
+                <article class="panel history-panel">
+                    <div class="panel-header">
+                        <div>
+                            <p class="eyebrow">HISTÓRICO RECENTE</p>
+                            <h2>Variação de temperatura</h2>
+                        </div><span class="unit-label">°C / ÚLTIMAS LEITURAS</span>
+                    </div>
+                    <div class="chart-wrap">
+                        <div class="chart-y-axis">
+                            <span>35°</span><span>30°</span><span>25°</span><span>20°</span><span>15°</span>
+                        </div>
+                        <div class="chart-area" id="temperature-chart">
+                            <div class="chart-grid-lines"></div>
+                            <div class="chart-empty">As leituras aparecerão aqui</div>
+                        </div>
+                    </div>
+                    <div class="chart-x-axis" id="chart-labels">
+                        <span>--:--</span><span>--:--</span><span>--:--</span><span>--:--</span><span>agora</span>
+                    </div>
+                </article>
+                <aside class="panel status-panel"> 
+                    <!-- aside representa uma seção de uma página cuja informação é apenas indiretamente relacionada 
+                ao conteúdo principal ao seu redor -->
+                    <div class="panel-header">
+                        <div>
+                            <p class="eyebrow">INTEGRAÇÃO</p>
+                            <h2>Conexões</h2>
+                        </div><span class="connection-bars">▮▮▮</span>
+                    </div>
+                    <div class="connection-row"><span class="connection-symbol">⌁</span>
+                        <div><strong>API Flask</strong><small id="api-endpoint">localhost:5000</small></div><span
+                            class="connection-pill offline" id="api-pill">OFFLINE</span>
+                    </div>
+                    <div class="connection-row"><span class="connection-symbol">◉</span>
+                        <div><strong>Broker MQTT</strong><small>senai510/lttl/relogio</small></div><span
+                            class="connection-pill pending" id="mqtt-pill">AGUARDANDO</span>
+                    </div>
+                    <div class="divider"></div>
+                    <div class="detail-row"><span>Última leitura</span><strong id="detail-time">--:--</strong></div>
+                    <div class="detail-row"><span>Registros recebidos</span><strong id="detail-count">0</strong></div>
+                    <button class="outline-button" id="history-button">VER HISTÓRICO COMPLETO <span>↗</span></button>
+                </aside>
+            
+            </section>
+            <section class="bottom-strip">
+                <div><span class="strip-label">SISTEMA</span><strong>Weather IoT</strong>
+                    <span class="strip-muted">·
+                        Monitoramento ambiental conectado</span>
+                </div>
+                <div class="footer-note"><span class="green-dot"></span>
+                    Atualização automática a cada 10 segundos</div>
+            </section>
+        </main>
+    </div>
+    <div class="toast" id="toast" role="status"></div>
 </body>
 <script src="static/js/script.js"></script>
+
 </html>

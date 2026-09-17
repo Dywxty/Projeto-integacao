@@ -43,6 +43,9 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+weather.db
+weather.db-shm
+weather.db-wal
 nosetests.xml
 coverage.xml
 *.cover
