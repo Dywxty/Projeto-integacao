@@ -1,0 +1,13 @@
+CREATE TABLE IF NOT EXISTS leituras (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    hora VARCHAR(10) NOT NULL,
+    temperatura REAL NOT NULL,
+    umidade REAL NOT NULL,
+    sensacao REAL NOT NULL,
+    vento REAL NOT NULL,
+    clima VARCHAR(100) NOT NULL,
+    data_hora TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_leituras_data_hora
+    ON leituras (data_hora DESC);

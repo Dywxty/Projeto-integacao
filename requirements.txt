@@ -1,0 +1,4 @@
+Flask
+paho-mqtt
+psycopg[binary]
+python-dotenv

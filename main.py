@@ -1,13 +1,16 @@
 from flask import Flask, jsonify, request
 import paho.mqtt.client as mqtt
-import sqlite3
 import json
 import os
-from datetime import datetime
+from pathlib import Path
+import psycopg
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
 app = Flask(__name__)
-
-
+# CORS
 @app.after_request
 def permitir_frontend(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
@@ -16,83 +19,146 @@ def permitir_frontend(response):
     return response
 
 
-# =========================================================
-# CONFIGURAÇÕES
-# =========================================================
-
+# CONFIGURAÇÕES MQTT
 MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
 MQTT_TOPIC = "senai510/lttl/relogio"
 
 
-# =========================================================
 # BANCO DE DADOS
-# =========================================================
-
-DATABASE_PATH = os.getenv("DATABASE_PATH", "weather.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def conectar_banco():
-    conexao = sqlite3.connect(DATABASE_PATH)
-    conexao.execute("PRAGMA journal_mode=WAL")
-    return conexao
+    """
+    Cria uma conexão com o PostgreSQL do Neon.
+    """
+    if not DATABASE_URL or not DATABASE_URL.startswith(("postgresql://", "postgres://")):
+        raise RuntimeError(
+            "DATABASE_URL não foi configurada corretamente no arquivo .env"
+        )
+
+    return psycopg.connect(DATABASE_URL)
 
 
 def criar_tabela():
+    """
+    Cria a tabela e o índice caso ainda não existam.
+    Não apaga dados existentes.
+    """
 
-    conexao = conectar_banco()
-    cursor = conexao.cursor()
+    schema_path = BASE_DIR / "schema.sql"
+    schema = schema_path.read_text(encoding="utf-8")
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS leituras (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            hora VARCHAR(10),
-            temperatura REAL,
-            umidade REAL,
-            sensacao REAL,
-            vento REAL,
-            clima VARCHAR(100),
-            data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    with conectar_banco() as conexao:
+        with conexao.cursor() as cursor:
+            cursor.execute(schema)
+
+
+# 
+# VALIDAÇÃO DOS DADOS
+# 
+
+def validar_dados(dados):
+    """
+    Valida os dados recebidos pela API ou pelo MQTT.
+    """
+
+    campos_obrigatorios = [
+        "hora",
+        "temperatura",
+        "umidade",
+        "sensacao",
+        "vento",
+        "clima"
+    ]
+
+    # Verifica campos obrigatórios
+    campos_ausentes = [
+        campo
+        for campo in campos_obrigatorios
+        if campo not in dados
+    ]
+
+    if campos_ausentes:
+        return (
+            False,
+            f"Campos obrigatórios ausentes: {', '.join(campos_ausentes)}"
         )
-    """)
 
-    conexao.commit()
+    # Verifica valores numéricos
+    try:
+        temperatura = float(dados["temperatura"])
+        umidade = float(dados["umidade"])
+        sensacao = float(dados["sensacao"])
+        vento = float(dados["vento"])
+    except (TypeError, ValueError):
+        return (
+            False,
+            "temperatura, umidade, sensacao e vento devem ser valores numéricos"
+        )
 
-    cursor.close()
-    conexao.close()
+    # Temperatura
+    if temperatura < -50 or temperatura > 70:
+        return (
+            False,
+            "A temperatura deve estar entre -50 e 70 graus Celsius"
+        )
+
+    # Umidade
+    if umidade < 0 or umidade > 100:
+        return (
+            False,
+            "A umidade deve estar entre 0 e 100%"
+        )
+
+    # Vento
+    if vento < 0:
+        return (
+            False,
+            "O vento deve ser maior ou igual a 0"
+        )
+
+    return True, None
 
 
-# =========================================================
+
 # SALVAR DADOS
-# =========================================================
-
 def salvar_dados(dados):
 
-    conexao = conectar_banco()
-    cursor = conexao.cursor()
+    valido, erro = validar_dados(dados)
 
-    cursor.execute("""
-        INSERT INTO leituras
-        (hora, temperatura, umidade, sensacao, vento, clima)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """, (
-        dados.get("hora"),
-        dados.get("temperatura"),
-        dados.get("umidade"),
-        dados.get("sensacao"),
-        dados.get("vento"),
-        dados.get("clima")
-    ))
+    if not valido:
+        raise ValueError(erro)
 
-    conexao.commit()
+    with conectar_banco() as conexao:
+        with conexao.cursor() as cursor:
 
-    cursor.close()
-    conexao.close()
+            cursor.execute("""
+                INSERT INTO leituras (
+                    hora,
+                    temperatura,
+                    umidade,
+                    sensacao,
+                    vento,
+                    clima
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                dados["hora"],
+                float(dados["temperatura"]),
+                float(dados["umidade"]),
+                float(dados["sensacao"]),
+                float(dados["vento"]),
+                dados["clima"]
+            ))
+
+        conexao.commit()
 
 
-# =========================================================
+# 
 # MQTT
-# =========================================================
+# 
 
 def ao_conectar(client, userdata, flags, rc):
 
@@ -132,15 +198,24 @@ def ao_receber_mensagem(client, userdata, mensagem):
 
         print("Dados salvos no banco!")
 
+    except json.JSONDecodeError:
+
+        print("Erro: a mensagem MQTT não contém um JSON válido.")
+
+    except ValueError as erro:
+
+        print("Erro de validação:")
+        print(erro)
+
     except Exception as erro:
 
         print("Erro ao processar mensagem:")
         print(erro)
 
 
-# =========================================================
+# 
 # CLIENTE MQTT
-# =========================================================
+# 
 
 cliente_mqtt = mqtt.Client()
 
@@ -148,9 +223,9 @@ cliente_mqtt.on_connect = ao_conectar
 cliente_mqtt.on_message = ao_receber_mensagem
 
 
-# =========================================================
+# 
 # ROTAS FLASK
-# =========================================================
+# 
 
 @app.route("/")
 def inicio():
@@ -162,14 +237,28 @@ def inicio():
     })
 
 
-# ---------------------------------------------------------
-# ROTA PARA RECEBER DADOS MANUALMENTE
-# ---------------------------------------------------------
+# 
+# POST /dados
+# 
 
 @app.route("/dados", methods=["POST"])
 def receber_dados():
 
-    dados = request.get_json()
+    # Verifica se o conteúdo é JSON válido
+    if not request.is_json:
+        return jsonify({
+            "erro": "O corpo da requisição deve ser um JSON válido"
+        }), 400
+
+    try:
+
+        dados = request.get_json()
+
+    except Exception:
+
+        return jsonify({
+            "erro": "JSON inválido"
+        }), 400
 
     if not dados:
 
@@ -186,6 +275,19 @@ def receber_dados():
             "dados": dados
         }), 201
 
+    except ValueError as erro:
+
+        return jsonify({
+            "erro": str(erro)
+        }), 400
+
+    except psycopg.Error as erro:
+
+        return jsonify({
+            "erro": "Erro ao acessar o banco de dados",
+            "detalhes": str(erro)
+        }), 500
+
     except Exception as erro:
 
         return jsonify({
@@ -193,40 +295,108 @@ def receber_dados():
         }), 500
 
 
-# ---------------------------------------------------------
-# ROTA PARA CONSULTAR TODOS OS DADOS
-# ---------------------------------------------------------
+# 
+# GET /dados
+# 
 
 @app.route("/dados", methods=["GET"])
 def listar_dados():
 
-    conexao = conectar_banco()
-    cursor = conexao.cursor()
+    try:
 
-    cursor.execute("""
-        SELECT
-            id,
-            hora,
-            temperatura,
-            umidade,
-            sensacao,
-            vento,
-            clima,
-            data_hora
-        FROM leituras
-        ORDER BY id DESC
-    """)
+        with conectar_banco() as conexao:
+            with conexao.cursor() as cursor:
 
-    registros = cursor.fetchall()
+                cursor.execute("""
+                    SELECT
+                        id,
+                        hora,
+                        temperatura,
+                        umidade,
+                        sensacao,
+                        vento,
+                        clima,
+                        data_hora
+                    FROM leituras
+                    ORDER BY data_hora DESC
+                """)
 
-    cursor.close()
-    conexao.close()
+                registros = cursor.fetchall()
 
-    dados = []
+        dados = []
 
-    for registro in registros:
+        for registro in registros:
 
-        dados.append({
+            dados.append({
+                "id": registro[0],
+                "hora": registro[1],
+                "temperatura": registro[2],
+                "umidade": registro[3],
+                "sensacao": registro[4],
+                "vento": registro[5],
+                "clima": registro[6],
+                "data_hora": (
+                    registro[7]
+                    if isinstance(registro[7], str)
+                    else registro[7].isoformat()
+                )
+            })
+
+        return jsonify(dados), 200
+
+    except psycopg.Error as erro:
+
+        return jsonify({
+            "erro": "Erro ao acessar o banco de dados",
+            "detalhes": str(erro)
+        }), 500
+
+    except Exception as erro:
+
+        return jsonify({
+            "erro": str(erro)
+        }), 500
+
+
+# 
+# GET /dados/ultimo
+# 
+
+@app.route("/dados/ultimo", methods=["GET"])
+def ultimo_dado():
+
+    try:
+
+        with conectar_banco() as conexao:
+            with conexao.cursor() as cursor:
+
+                cursor.execute("""
+                    SELECT
+                        id,
+                        hora,
+                        temperatura,
+                        umidade,
+                        sensacao,
+                        vento,
+                        clima,
+                        data_hora
+                    FROM leituras
+                    ORDER BY data_hora DESC
+                    LIMIT 1
+                """)
+
+                registro = cursor.fetchone()
+
+        # Banco sem registros
+        if not registro:
+
+            return jsonify({
+                "mensagem": "Nenhum dado encontrado",
+                "dados": None
+            }), 200
+
+        dados = {
+
             "id": registro[0],
             "hora": registro[1],
             "temperatura": registro[2],
@@ -234,68 +404,33 @@ def listar_dados():
             "sensacao": registro[4],
             "vento": registro[5],
             "clima": registro[6],
-            "data_hora": registro[7] if isinstance(registro[7], str) else registro[7].isoformat()
-        })
+            "data_hora": (
+                registro[7]
+                if isinstance(registro[7], str)
+                else registro[7].isoformat()
+            )
 
-    return jsonify(dados)
+        }
 
+        return jsonify(dados), 200
 
-# ---------------------------------------------------------
-# ROTA PARA CONSULTAR O ÚLTIMO DADO
-# ---------------------------------------------------------
-
-@app.route("/dados/ultimo", methods=["GET"])
-def ultimo_dado():
-
-    conexao = conectar_banco()
-    cursor = conexao.cursor()
-
-    cursor.execute("""
-        SELECT
-            id,
-            hora,
-            temperatura,
-            umidade,
-            sensacao,
-            vento,
-            clima,
-            data_hora
-        FROM leituras
-        ORDER BY id DESC
-        LIMIT 1
-    """)
-
-    registro = cursor.fetchone()
-
-    cursor.close()
-    conexao.close()
-
-    if not registro:
+    except psycopg.Error as erro:
 
         return jsonify({
-            "mensagem": "Nenhum dado encontrado",
-            "dados": None
-        }), 200
+            "erro": "Erro ao acessar o banco de dados",
+            "detalhes": str(erro)
+        }), 500
 
-    dados = {
+    except Exception as erro:
 
-        "id": registro[0],
-        "hora": registro[1],
-        "temperatura": registro[2],
-        "umidade": registro[3],
-        "sensacao": registro[4],
-        "vento": registro[5],
-        "clima": registro[6],
-        "data_hora": registro[7] if isinstance(registro[7], str) else registro[7].isoformat()
-
-    }
-
-    return jsonify(dados)
+        return jsonify({
+            "erro": str(erro)
+        }), 500
 
 
-# =========================================================
+# 
 # INICIAR MQTT
-# =========================================================
+# 
 
 def iniciar_mqtt():
 
@@ -317,14 +452,27 @@ def iniciar_mqtt():
         print(erro)
 
 
+# 
 # INICIALIZAÇÃO
+# 
+
 if __name__ == "__main__":
 
     print("===================================")
     print("       WEATHER IoT - FLASK")
     print("===================================")
 
-    criar_tabela()
+    try:
+
+        criar_tabela()
+
+        print("Banco de dados conectado!")
+        print("Tabela 'leituras' verificada!")
+
+    except Exception as erro:
+
+        print("ERRO AO CONFIGURAR O BANCO:")
+        print(erro)
 
     iniciar_mqtt()
 
