@@ -1,4 +1,4 @@
-# Byte-compiled / optimized / DLL files
+"C:\Users\52095216806\.platformio\penv\Scripts\pio.exe" run -d "C:\Users\52095216806\Documents\PlatformIO\Projects\Projeto_incremento" -t upload -p COM3 --upload-port COM3"C:\Users\52095216806\.platformio\penv\Scripts\pio.exe" run -d "C:\Users\52095216806\Documents\PlatformIO\Projects\Projeto_incremento" -t upload -p COM3 --upload-port COM3# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class

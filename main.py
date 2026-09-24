@@ -160,9 +160,9 @@ def salvar_dados(dados):
 # MQTT
 # 
 
-def ao_conectar(client, userdata, flags, rc):
+def ao_conectar(client, userdata, flags, reason_code, properties):
 
-    if rc == 0:
+    if reason_code == 0:
 
         print("Conectado ao MQTT!")
 
@@ -173,7 +173,7 @@ def ao_conectar(client, userdata, flags, rc):
 
     else:
 
-        print("Erro ao conectar ao MQTT:", rc)
+        print("Erro ao conectar ao MQTT:", reason_code)
 
 
 def ao_receber_mensagem(client, userdata, mensagem):
@@ -184,12 +184,14 @@ def ao_receber_mensagem(client, userdata, mensagem):
 
     try:
 
-        texto = mensagem.payload.decode()
+        texto = mensagem.payload.decode("utf-8-sig").strip()
 
         print("Mensagem:")
         print(texto)
 
         dados = json.loads(texto)
+        if not isinstance(dados, dict):
+            raise ValueError("o payload MQTT deve ser um objeto JSON")
 
         print("Dados recebidos:")
         print(dados)
@@ -198,9 +200,10 @@ def ao_receber_mensagem(client, userdata, mensagem):
 
         print("Dados salvos no banco!")
 
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as erro:
 
-        print("Erro: a mensagem MQTT não contém um JSON válido.")
+        print(f"Erro: JSON MQTT inválido no tópico {mensagem.topic}: {erro}")
+        print(f"Payload bruto: {mensagem.payload!r}")
 
     except ValueError as erro:
 
@@ -217,7 +220,7 @@ def ao_receber_mensagem(client, userdata, mensagem):
 # CLIENTE MQTT
 # 
 
-cliente_mqtt = mqtt.Client()
+cliente_mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 
 cliente_mqtt.on_connect = ao_conectar
 cliente_mqtt.on_message = ao_receber_mensagem
@@ -234,6 +237,16 @@ def inicio():
         "projeto": "Weather IoT",
         "status": "online",
         "mqtt": MQTT_TOPIC
+    })
+
+
+@app.route("/status", methods=["GET"])
+def status():
+
+    return jsonify({
+        "api": True,
+        "mqtt": cliente_mqtt.is_connected(),
+        "topico": MQTT_TOPIC
     })
 
 
@@ -479,5 +492,6 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=5000,
-        debug=True
+        debug=True,
+        use_reloader=False
     )

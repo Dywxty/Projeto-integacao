@@ -640,3 +640,8 @@ body:before {
         font-size: 61px;
     }
 }
+
+.clock-reading {
+    font-size: 61px;
+    letter-spacing: -.08em;
+}

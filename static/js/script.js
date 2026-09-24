@@ -1,22 +1,165 @@
 const API_BASE = window.WEATHER_API_URL || (window.location.port === '5000' ? '' : 'http://localhost:5000');
 const MQTT_CONFIG = { host: 'broker.hivemq.com', port: 8884, path: '/mqtt', topic: 'senai510/lttl/relogio' };
-const state = { history: [], last: null };
+
+const state = { history: [], last: null, lastSource: null, lastUpdatedAt: 0 };
+const POLL_INTERVAL_MS = 15 * 60 * 1000;
+let loadingLatest = false;
+let mqttReconnectTimer = null;
 const $ = (id) => document.getElementById(id);
-const number = (value, fallback = null) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; };
+const number = (value, fallback = null) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+function updateRealtimeClock() {
+    const now = new Date();
+    const time = now.toLocaleTimeString('pt-BR', {
+        timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+    const date = now.toLocaleDateString('pt-BR', {
+        timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric'
+    });
+    $('hero-clock').textContent = time;
+    $('hero-date').textContent = date;
+}
 function setConnection(type, online, label) {
-    const pill = $(type === 'api' ? 'api-pill' : 'mqtt-pill'); if (type === 'api') { $('api-dot').className = online ? 'online' : ''; $('api-status').textContent = label; }
+    const pill = $(type === 'api' ? 'api-pill' : 'mqtt-pill');
+    if (type === 'api') {
+        $('api-dot').className = online ? 'online' : '';
+        $('api-status').textContent = label;
+    }
     if (pill) {
         pill.textContent = online ? 'ONLINE' : label; pill.className = `connection-pill 
         ${online ? 'online' : type === 'mqtt' ? 'pending' : 'offline'}`;
     }
 }
-function conditionText(data)
- { return data.clima ||
-     (data.temperatura >= 30 ? 'Quente' : data.temperatura <= 18 ? 'Frio' : data.umidade 
-        >= 80 ? 'Úmido' : 'Agradável'); }
-function updateDashboard(data) { const temperature = number(data.temperatura, 0); 
-    const humidity = number(data.umidade, 0); const condition = conditionText({ ...data, temperatura: temperature, umidade: humidity }); const time = data.hora || (data.data_hora ? new Date(data.data_hora).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '--:--'); $('temperature').textContent = temperature.toFixed(1); $('hero-temperature').textContent = temperature.toFixed(1); $('humidity').textContent = Math.round(humidity); $('condition').textContent = condition; $('hero-weather').textContent = condition; $('hero-time').textContent = time; $('detail-time').textContent = time; $('humidity-meter').style.width = `${Math.max(0, Math.min(100, humidity))}%`; $('temperature-meter').style.width = `${Math.max(5, Math.min(100, temperature * 2.5))}%`; $('condition-description').textContent = `${data.sensacao ? `Sensação de ${data.sensacao}°C` : 'Leitura atual do ambiente'} · ${time}`; state.last = { ...data, temperatura: temperature, hora: time }; $('last-sync').textContent = `ÚLTIMA LEITURA ${time}`; if (!state.history.some((item) => item.id === data.id && data.id)) state.history.push(state.last); state.history = state.history.slice(-12); $('detail-count').textContent = state.history.length; renderChart(); }
-function renderChart() { const chart = $('temperature-chart'); const points = state.history.filter((item) => Number.isFinite(item.temperatura)); if (!points.length) return; const width = chart.clientWidth || 500; const height = chart.clientHeight || 213; const coordinates = points.map((item, index) => `${(index / Math.max(points.length - 1, 1)) * width},${height - ((item.temperatura - 15) / 20) * height}`).join(' '); $('chart-labels').innerHTML = points.slice(-5).map((item) => `<span>${item.hora || '--:--'}</span>`).join(''); chart.querySelector('.chart-empty')?.remove(); chart.querySelector('.chart-svg')?.remove(); chart.insertAdjacentHTML('beforeend', `<svg class="chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"><polyline points="${coordinates}" fill="none" stroke="#cbef72" stroke-width="2" vector-effect="non-scaling-stroke"/>${points.map((item, index) => `<circle cx="${(index / Math.max(points.length - 1, 1)) * width}" cy="${height - ((item.temperatura - 15) / 20) * height}" r="3" fill="#cbef72"/>`).join('')}</svg>`); }
-async function loadLatest() { try { const response = await fetch(`${API_BASE}/dados/ultimo`, { cache: 'no-store' }); if (!response.ok) throw new Error('API indisponível'); const data = await response.json(); setConnection('api', true, 'API conectada'); if (data.dados === null || data.temperatura === undefined) { setConnection('api', true, 'API online · sem leituras'); return; } updateDashboard(data); const historyResponse = await fetch(`${API_BASE}/dados`, { cache: 'no-store' }); if (historyResponse.ok) { const history = await historyResponse.json(); state.history = history.reverse().slice(-12); updateDashboard(state.last); } } catch (error) { setConnection('api', false, 'API desconectada'); } }
-function connectMqtt() { if (typeof Paho === 'undefined') return; try { const client = new Paho.MQTT.Client(MQTT_CONFIG.host, MQTT_CONFIG.port, `weather-${Date.now()}`); client.onConnectionLost = () => setConnection('mqtt', false, 'OFFLINE'); client.onMessageArrived = (message) => { try { updateDashboard(JSON.parse(message.payloadString)); setConnection('mqtt', true, 'ONLINE'); } catch (error) { console.warn('Mensagem MQTT inválida', error); } }; client.connect({ useSSL: true, path: MQTT_CONFIG.path, onSuccess: () => { client.subscribe(MQTT_CONFIG.topic); setConnection('mqtt', true, 'ONLINE'); }, onFailure: () => setConnection('mqtt', false, 'INDISPONÍVEL') }); } catch (error) { setConnection('mqtt', false, 'INDISPONÍVEL'); } }
-$('refresh-button').addEventListener('click', () => { loadLatest(); $('toast').textContent = 'Atualizando leituras...'; $('toast').classList.add('show'); setTimeout(() => $('toast').classList.remove('show'), 1800); }); $('history-button').addEventListener('click', () => document.querySelector('.history-panel').scrollIntoView({ behavior: 'smooth' })); window.addEventListener('resize', renderChart); loadLatest(); connectMqtt(); setInterval(loadLatest, 10000);
+function conditionText(data) {
+    return data.clima ||
+        (data.temperatura >= 30 ? 'Quente' : data.temperatura <= 18 ? 'Frio' : data.umidade
+            >= 80 ? 'Úmido' : 'Agradável');
+}
+function displayTime(data) {
+    if (data.data_hora) {
+        const parsed = new Date(data.data_hora);
+        if (!Number.isNaN(parsed.getTime())) {
+            return parsed.toLocaleTimeString('pt-BR', {
+                timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit'
+            });
+        }
+    }
+    return data.hora || '--:--';
+}
+function updateDashboard(data) {
+    const temperature = number(data.temperatura, 0);
+    const humidity = number(data.umidade, 0); const condition = conditionText({
+        ...data,
+        temperatura: temperature, umidade: humidity
+    }); const time = displayTime(data); $('temperature').textContent = temperature.toFixed(1);
+    $('humidity').textContent = Math.round(humidity); $('condition').textContent = condition;
+    $('detail-time').textContent = time;
+    $('humidity-meter').style.width = `${Math.max(0, Math.min(100, humidity))}%`;
+    $('condition-description').textContent = `${data.sensacao ? `Sensação de ${data.sensacao}°C` : 'Leitura atual do ambiente'} · 
+            ${time}`;
+    state.last = { ...data, temperatura: temperature, hora: time };
+    $('last-sync').textContent = `ÚLTIMA LEITURA ${time}`;
+    if (!state.history.some((item) => item.id === data.id && data.id)) state.history.push(state.last);
+    state.history = state.history.slice(-12);
+    $('detail-count').textContent = state.history.length; renderChart();
+}
+function renderChart() {
+    const chart = $('temperature-chart');
+    const points = state.history.filter((item) => Number.isFinite(item.temperatura));
+    if (!points.length) return; const width = chart.clientWidth || 500; const height = chart.clientHeight ||
+        213; const coordinates = points.map((item, index) => `${(index / Math.max(points.length - 1, 1)) * width},
+    ${height - ((item.temperatura - 15) / 20) * height}`).join(' ');
+    $('chart-labels').innerHTML = points.slice(-5).map((item) => `<span>${item.hora || '--:--'}</span>`).join('');
+    chart.querySelector('.chart-empty')?.remove(); chart.querySelector('.chart-svg')?.remove();
+    chart.insertAdjacentHTML('beforeend', `<svg class="chart-svg" viewBox="0 0 ${width} ${height}" 
+        preserveAspectRatio="none"><polyline points="${coordinates}" fill="none" stroke="#cbef72" 
+        stroke-width="2" vector-effect="non-scaling-stroke"/>${points.map((item, index) => `<circle cx="
+            ${(index / Math.max(points.length - 1, 1)) * width}" cy="${height - ((item.temperatura - 15) / 20)
+        * height}" r="3" fill="#cbef72"/>`).join('')}</svg>`);
+}
+async function loadLatest() {
+    if (loadingLatest) return;
+    loadingLatest = true;
+    try {
+        const statusResponse = await fetch(`${API_BASE}/status`, { cache: 'no-store' });
+        if (statusResponse.ok) {
+            const status = await statusResponse.json();
+            setConnection('mqtt', status.mqtt, status.mqtt ? 'ONLINE' : 'INDISPONÍVEL');
+        }
+        const response = await fetch(`${API_BASE}/dados/ultimo`,
+            { cache: 'no-store' }); if (!response.ok) throw new Error('API indisponível');
+        const data = await response.json(); setConnection('api', true, 'API conectada');
+        if (data.dados === null || data.temperatura === undefined) {
+            setConnection('api', true, 'API online · sem leituras'); return;
+
+        }
+        updateDashboard(data);
+        state.lastSource = 'api';
+        state.lastUpdatedAt = data.data_hora ? Date.parse(data.data_hora) : Date.now();
+        const historyResponse = await fetch(`${API_BASE}/dados`,
+            { cache: 'no-store' }); if (historyResponse.ok) {
+            const history = await historyResponse.json();
+            const orderedHistory = history.slice().reverse().slice(-12);
+            state.history = orderedHistory;
+            $('detail-count').textContent = history.length;
+            renderChart();
+        }
+    } catch (error) { setConnection('api', false, 'API desconectada'); }
+    finally { loadingLatest = false; }
+}
+function connectMqtt() {
+    if (typeof Paho === 'undefined') {
+        setConnection('mqtt', false, 'BIBLIOTECA INDISPONÍVEL');
+        return;
+    }
+    try {
+        const client = new Paho.MQTT.Client(MQTT_CONFIG.host,
+            MQTT_CONFIG.port, MQTT_CONFIG.path, `weather-${Date.now()}`);
+        const reconnect = () => {
+            if (mqttReconnectTimer) return;
+            mqttReconnectTimer = setTimeout(() => {
+                mqttReconnectTimer = null;
+                connectMqtt();
+            }, 5000);
+        };
+        client.onConnectionLost = () => {
+            setConnection('mqtt', false, 'OFFLINE');
+            reconnect();
+        };
+        client.onMessageArrived = (message) => {
+            try {
+                const payload = JSON.parse(message.payloadString.replace(/^\uFEFF/, '').trim());
+                if (!payload || Array.isArray(payload) || typeof payload !== 'object') {
+                    throw new Error('o payload precisa ser um objeto JSON');
+                }
+                updateDashboard(payload);
+                state.lastSource = 'mqtt';
+                state.lastUpdatedAt = Date.now();
+                setConnection('mqtt', true, 'ONLINE');
+            } catch (error) {
+                console.warn('Mensagem MQTT inválida:', message.payloadString, error);
+            }
+        };
+        client.connect({
+            useSSL: true, path: MQTT_CONFIG.path, onSuccess: () => {
+                client.subscribe(MQTT_CONFIG.topic); setConnection('mqtt', true, 'ONLINE');
+            }, onFailure: () => {
+                setConnection('mqtt', false, 'INDISPONÍVEL');
+                reconnect();
+            }
+        });
+    } catch (error) {
+        setConnection('mqtt', false, 'INDISPONÍVEL');
+    }
+}
+$('refresh-button').addEventListener('click', () => {
+    loadLatest(); $('toast').textContent = 'Atualizando leituras...';
+    $('toast').classList.add('show'); setTimeout(() => $('toast').classList.remove('show'), 1800);
+});
+$('history-button').addEventListener('click', () =>
+    document.querySelector('.history-panel').scrollIntoView({ behavior: 'smooth' }));
+window.addEventListener('resize', renderChart); updateRealtimeClock();
+setInterval(updateRealtimeClock, 1000);
+loadLatest(); connectMqtt(); setInterval(loadLatest, POLL_INTERVAL_MS);
