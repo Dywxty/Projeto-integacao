@@ -1,8 +1,12 @@
 const API_BASE = window.WEATHER_API_URL || (window.location.port === '5000' ? '' : 'http://localhost:5000');
 const MQTT_CONFIG = { host: 'broker.hivemq.com', port: 8884, path: '/mqtt', topic: 'senai510/lttl/relogio' };
 
-const state = { history: [], last: null, lastSource: null, lastUpdatedAt: 0 };
+const state = {
+    history: [], last: null, lastSource: null, lastUpdatedAt: 0,
+    dht: { temperature: null, humidity: null }
+};
 const POLL_INTERVAL_MS = 15 * 60 * 1000;
+const BOARD_CLIMATE_INTERVAL_MS = 10 * 60 * 1000;
 let loadingLatest = false;
 let mqttReconnectTimer = null;
 const $ = (id) => document.getElementById(id);
@@ -48,13 +52,22 @@ function displayTime(data) {
     }
     return data.hora || '--:--';
 }
-function updateDashboard(data) {
-    const temperature = number(data.temperatura, 0);
-    const humidity = number(data.umidade, 0); const condition = conditionText({
-        ...data,
-        temperatura: temperature, umidade: humidity
-    }); const time = displayTime(data); $('temperature').textContent = temperature.toFixed(1);
-    $('humidity').textContent = Math.round(humidity); $('condition').textContent = condition;
+function updateDashboard(data, source = 'api') {
+    if (source === 'mqtt') {
+        const sensorTemperature = data.sensor_temperatura === null
+            || data.sensor_temperatura === undefined ? null : number(data.sensor_temperatura);
+        const sensorHumidity = data.sensor_umidade === null
+            || data.sensor_umidade === undefined ? null : number(data.sensor_umidade);
+        if (sensorTemperature !== null) state.dht.temperature = sensorTemperature;
+        if (sensorHumidity !== null) state.dht.humidity = sensorHumidity;
+    }
+    const temperature = state.dht.temperature ?? number(data.temperatura, 0);
+    const humidity = state.dht.humidity ?? number(data.umidade, 0);
+    const condition = conditionText(data);
+    const time = displayTime(data);
+    $('temperature').textContent = state.dht.temperature === null ? '--' : temperature.toFixed(1);
+    $('humidity').textContent = state.dht.humidity === null ? '--' : Math.round(humidity);
+    $('condition').textContent = condition;
     $('detail-time').textContent = time;
     $('humidity-meter').style.width = `${Math.max(0, Math.min(100, humidity))}%`;
     $('condition-description').textContent = `${data.sensacao ? `Sensação de ${data.sensacao}°C` : 'Leitura atual do ambiente'} · 
@@ -109,6 +122,16 @@ async function loadLatest() {
     } catch (error) { setConnection('api', false, 'API desconectada'); }
     finally { loadingLatest = false; }
 }
+async function sendClimateToBoard() {
+    try {
+        const response = await fetch(`${API_BASE}/clima/publicar`, { method: 'POST' });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.erro || 'Falha ao enviar clima para a placa');
+        console.info('Clima enviado para a placa:', result.dados);
+    } catch (error) {
+        console.error('Não foi possível enviar o clima para a placa:', error);
+    }
+}
 function connectMqtt() {
     if (typeof Paho === 'undefined') {
         setConnection('mqtt', false, 'BIBLIOTECA INDISPONÍVEL');
@@ -124,7 +147,8 @@ function connectMqtt() {
                 connectMqtt();
             }, 5000);
         };
-        client.onConnectionLost = () => {
+        client.onConnectionLost = (response) => {
+            console.error('Conexão MQTT via WebSocket perdida:', response);
             setConnection('mqtt', false, 'OFFLINE');
             reconnect();
         };
@@ -134,7 +158,7 @@ function connectMqtt() {
                 if (!payload || Array.isArray(payload) || typeof payload !== 'object') {
                     throw new Error('o payload precisa ser um objeto JSON');
                 }
-                updateDashboard(payload);
+                updateDashboard(payload, 'mqtt');
                 state.lastSource = 'mqtt';
                 state.lastUpdatedAt = Date.now();
                 setConnection('mqtt', true, 'ONLINE');
@@ -143,14 +167,16 @@ function connectMqtt() {
             }
         };
         client.connect({
-            useSSL: true, path: MQTT_CONFIG.path, onSuccess: () => {
+            useSSL: true, onSuccess: () => {
                 client.subscribe(MQTT_CONFIG.topic); setConnection('mqtt', true, 'ONLINE');
-            }, onFailure: () => {
+            }, onFailure: (error) => {
+                console.error('Falha ao conectar ao MQTT via WebSocket:', error);
                 setConnection('mqtt', false, 'INDISPONÍVEL');
                 reconnect();
             }
         });
     } catch (error) {
+        console.error('Erro ao iniciar cliente MQTT via WebSocket:', error);
         setConnection('mqtt', false, 'INDISPONÍVEL');
     }
 }
@@ -162,4 +188,6 @@ $('history-button').addEventListener('click', () =>
     document.querySelector('.history-panel').scrollIntoView({ behavior: 'smooth' }));
 window.addEventListener('resize', renderChart); updateRealtimeClock();
 setInterval(updateRealtimeClock, 1000);
-loadLatest(); connectMqtt(); setInterval(loadLatest, POLL_INTERVAL_MS);
+loadLatest(); connectMqtt(); sendClimateToBoard();
+setInterval(loadLatest, POLL_INTERVAL_MS);
+setInterval(sendClimateToBoard, BOARD_CLIMATE_INTERVAL_MS);

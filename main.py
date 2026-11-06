@@ -1,8 +1,10 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 import paho.mqtt.client as mqtt
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import urlopen
 import psycopg
 from dotenv import load_dotenv
 
@@ -23,6 +25,66 @@ def permitir_frontend(response):
 MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
 MQTT_TOPIC = "senai510/lttl/relogio"
+MQTT_DISPLAY_TOPIC = f"{MQTT_TOPIC}/display"
+mqtt_erro = None
+
+
+def buscar_clima_open_meteo():
+    parametros = urlencode({
+        "latitude": -22.72528,
+        "longitude": -47.64917,
+        "current": (
+            "temperature_2m,relative_humidity_2m,apparent_temperature,"
+            "wind_speed_10m,weather_code"
+        ),
+        "timezone": "America/Sao_Paulo",
+    })
+    url = f"https://api.open-meteo.com/v1/forecast?{parametros}"
+
+    with urlopen(url, timeout=10) as resposta:
+        dados_api = json.loads(resposta.read().decode("utf-8"))
+
+    atual = dados_api["current"]
+    codigo_clima = int(atual["weather_code"])
+    descricoes_clima = {
+        0: "Ensolarado",
+        1: "P. nublado",
+        2: "P. nublado",
+        3: "Nublado",
+        45: "Neblina",
+        48: "Neblina",
+        51: "Chuvisco",
+        53: "Chuvisco",
+        55: "Chuvisco",
+        56: "Chuvisco",
+        57: "Chuvisco",
+        61: "Chuvoso",
+        63: "Chuvoso",
+        65: "Chuvoso",
+        66: "Chuva gelo",
+        67: "Chuva gelo",
+        71: "Nevasca",
+        73: "Nevasca",
+        75: "Nevasca",
+        77: "Neve",
+        80: "Pancadas",
+        81: "Pancadas",
+        82: "Pancadas",
+        85: "Neve",
+        86: "Neve",
+        95: "Tempestade",
+        96: "Tempestade",
+        99: "Tempestade",
+    }
+
+    return {
+        "hora": atual["time"].split("T")[-1] + ":00",
+        "temperatura": float(atual["temperature_2m"]),
+        "umidade": float(atual["relative_humidity_2m"]),
+        "sensacao": float(atual["apparent_temperature"]),
+        "vento": float(atual["wind_speed_10m"]),
+        "clima": descricoes_clima.get(codigo_clima, "Indisponivel"),
+    }
 
 
 # BANCO DE DADOS
@@ -162,7 +224,11 @@ def salvar_dados(dados):
 
 def ao_conectar(client, userdata, flags, reason_code, properties):
 
+    global mqtt_erro
+
     if reason_code == 0:
+
+        mqtt_erro = None
 
         print("Conectado ao MQTT!")
 
@@ -173,7 +239,22 @@ def ao_conectar(client, userdata, flags, reason_code, properties):
 
     else:
 
+        mqtt_erro = str(reason_code)
         print("Erro ao conectar ao MQTT:", reason_code)
+
+
+def ao_desconectar(client, userdata, disconnect_flags, reason_code, properties):
+
+    global mqtt_erro
+    mqtt_erro = str(reason_code)
+    print("MQTT desconectado:", reason_code)
+
+
+def ao_falhar_conexao(client, userdata):
+
+    global mqtt_erro
+    mqtt_erro = "Não foi possível alcançar o broker MQTT; tentando novamente"
+    print(mqtt_erro)
 
 
 def ao_receber_mensagem(client, userdata, mensagem):
@@ -223,6 +304,8 @@ def ao_receber_mensagem(client, userdata, mensagem):
 cliente_mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 
 cliente_mqtt.on_connect = ao_conectar
+cliente_mqtt.on_disconnect = ao_desconectar
+cliente_mqtt.on_connect_fail = ao_falhar_conexao
 cliente_mqtt.on_message = ao_receber_mensagem
 
 
@@ -240,14 +323,54 @@ def inicio():
     })
 
 
+@app.route("/painel", methods=["GET"])
+def painel():
+
+    return send_from_directory(BASE_DIR, "index.html")
+
+
 @app.route("/status", methods=["GET"])
 def status():
 
     return jsonify({
         "api": True,
         "mqtt": cliente_mqtt.is_connected(),
-        "topico": MQTT_TOPIC
+        "topico": MQTT_TOPIC,
+        "mqtt_erro": mqtt_erro
     })
+
+
+@app.route("/clima/publicar", methods=["POST"])
+def publicar_clima_para_placa():
+    if not cliente_mqtt.is_connected():
+        return jsonify({
+            "erro": "Cliente MQTT do servidor está desconectado"
+        }), 503
+
+    try:
+        dados = buscar_clima_open_meteo()
+        resultado = cliente_mqtt.publish(
+            MQTT_DISPLAY_TOPIC,
+            json.dumps(dados, ensure_ascii=False),
+            qos=1,
+        )
+        if resultado.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise RuntimeError(f"Falha ao publicar no MQTT (código {resultado.rc})")
+
+        resultado.wait_for_publish(timeout=5)
+        if not resultado.is_published():
+            raise TimeoutError("O broker não confirmou a publicação MQTT")
+
+        return jsonify({
+            "mensagem": "Clima enviado para a placa",
+            "topico": MQTT_DISPLAY_TOPIC,
+            "dados": dados,
+        }), 200
+    except Exception as erro:
+        app.logger.exception("Falha ao enviar clima para a placa")
+        return jsonify({
+            "erro": str(erro)
+        }), 502
 
 
 # 
@@ -447,22 +570,26 @@ def ultimo_dado():
 
 def iniciar_mqtt():
 
+    global mqtt_erro
+
     try:
 
-        cliente_mqtt.connect(
+        cliente_mqtt.reconnect_delay_set(min_delay=2, max_delay=30)
+        cliente_mqtt.connect_async(
             MQTT_BROKER,
             MQTT_PORT,
             60
         )
 
+        mqtt_erro = "Conectando ao broker MQTT"
         cliente_mqtt.loop_start()
 
-        print("MQTT iniciado!")
+        print("Tentativa de conexão MQTT iniciada; reconexão automática ativa.")
 
     except Exception as erro:
 
-        print("Erro ao iniciar MQTT:")
-        print(erro)
+        mqtt_erro = str(erro)
+        print("Erro ao iniciar MQTT:", erro)
 
 
 # 
